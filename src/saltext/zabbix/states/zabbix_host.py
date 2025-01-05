@@ -207,7 +207,7 @@ def present(host, groups, interfaces, **kwargs):
     groups = groupids
 
     # Get and validate proxyid
-    proxy_hostid = "0"
+    proxy_hostid = None
     if "proxy_host" in kwargs:
         proxy_host = kwargs.pop("proxy_host")
         # Test if proxy_host given as name
@@ -216,9 +216,8 @@ def present(host, groups, interfaces, **kwargs):
                 proxy_hostid = __salt__["zabbix.run_query"](
                     "proxy.get",
                     {
-                        "output": "proxyid",
-                        "selectInterface": "extend",
-                        "filter": {"host": f"{proxy_host}"},
+                        "output": "extend",
+                        "filter": {"name": f"{proxy_host}"},
                     },
                     **connection_args,
                 )[0]["proxyid"]
@@ -230,12 +229,54 @@ def present(host, groups, interfaces, **kwargs):
             try:
                 proxy_hostid = __salt__["zabbix.run_query"](
                     "proxy.get",
-                    {"proxyids": f"{proxy_host}", "output": "proxyid"},
+                    {"proxyids": f"{proxy_host}", "output": "extend"},
                     **connection_args,
                 )[0]["proxyid"]
             except TypeError:
                 ret["comment"] = f"Invalid proxy_host {proxy_host}"
                 return ret
+
+    monitored_by = kwargs.get("monitored_by", 0)
+
+    if monitored_by == 2 and "proxy_group" not in kwargs:
+        ret["comment"] = "'proxy_group' argument required when monitored_by=2 "
+        return ret
+
+    proxy_groupid = None
+    if "proxy_group" in kwargs:
+        proxy_group = kwargs.pop("proxy_group")
+        # Test if proxy_groupid given as name
+        if isinstance(proxy_group, str):
+            try:
+                proxy_groupid = __salt__["zabbix.run_query"](
+                    "proxygroup.get",
+                    {
+                        #"output": "proxyid",
+                        #"selectInterface": "extend",
+                        "output": "extend",
+                        #"filter": {"host": f"{proxy_host}"},
+                        #"filter": {"proxy_groupids": f"{proxy_group}"},
+                        "filter": {"name": f"{proxy_group}"},
+                        #"selectProxies": [proxy_group]
+                    },
+                    **connection_args,
+                )[0]["proxy_groupid"]
+            except TypeError:
+                ret["comment"] = f"Invalid proxy_group {proxy_group}"
+
+        # Otherwise lookup proxy_groupid
+        else:
+            try:
+                proxy_groupid = __salt__["zabbix.run_query"](
+                    "proxygroup.get",
+                    #{"proxyids": f"{proxy_host}", "output": "proxyid"},
+                    {"proxy_groupids": f"{proxy_group}", "output": "extend"},
+                    **connection_args,
+                )[0]["proxy_groupid"]
+            except TypeError:
+                ret["comment"] = f"Invalid proxy_group {proxy_group}"
+                return ret
+
 
     # Selects if the current inventory should be substituted by the new one
     inventory_clean = kwargs.pop("inventory_clean", True)
@@ -253,6 +294,7 @@ def present(host, groups, interfaces, **kwargs):
     visible_name = kwargs.pop("visible_name", None)
 
     host_extra_properties = {}
+    host_mandatory_properties = {}
     if kwargs:
         host_properties_definition = [
             "description",
@@ -272,6 +314,14 @@ def present(host, groups, interfaces, **kwargs):
         for param in host_properties_definition:
             if param in kwargs:
                 host_extra_properties[param] = kwargs.pop(param)
+
+        host_mandatory_properties = {}
+        if 'monitored_by' in kwargs:
+            host_mandatory_properties['monitored_by'] = kwargs['monitored_by']
+        if kwargs['monitored_by'] == 2 and proxy_groupid is not None:
+            host_mandatory_properties['proxy_groupid'] = proxy_groupid
+        elif kwargs['monitored_by'] == 1 and proxy_hostid is not None:
+            host_mandatory_properties['proxyid'] = proxy_hostid
 
     host_exists = __salt__["zabbix.host_exists"](host, **connection_args)
 
@@ -300,8 +350,10 @@ def present(host, groups, interfaces, **kwargs):
             "0" if host_inventory_mode == "-1" else host_inventory_mode,
         )
 
-        cur_proxy_hostid = host["proxy_hostid"]
-        if proxy_hostid != cur_proxy_hostid:
+        cur_proxy_hostid = host["proxyid"] # updated in 7.0
+        cur_proxy_groupid = host["proxy_groupid"] # updated in 7.0
+        cur_monitoredby  = host["monitored_by"]
+        if proxy_hostid != cur_proxy_hostid or monitored_by != cur_monitoredby or proxy_groupid != cur_proxy_groupid:
             update_proxy = True
 
         hostgroups = __salt__["zabbix.hostgroup_get"](hostids=hostid, **connection_args)
@@ -388,6 +440,7 @@ def present(host, groups, interfaces, **kwargs):
             if update_host:
                 # combine connection_args and host_updated_params
                 sum_kwargs = deepcopy(host_updated_params)
+                sum_kwargs.update(host_mandatory_properties)
                 sum_kwargs.update(connection_args)
                 hostupdate = __salt__["zabbix.host_update"](hostid, **sum_kwargs)
                 ret["changes"]["host"] = str(host_updated_params)
@@ -405,10 +458,15 @@ def present(host, groups, interfaces, **kwargs):
                 if "error" in hostupdate:
                     error.append(hostupdate["error"])
             if update_proxy:
+                sum_kwargs = deepcopy(host_mandatory_properties)
+                sum_kwargs.update(connection_args)
                 hostupdate = __salt__["zabbix.host_update"](
-                    hostid, proxy_hostid=proxy_hostid, **connection_args
-                )
-                ret["changes"]["proxy_hostid"] = str(proxy_hostid)
+                      hostid, **sum_kwargs
+                  )
+                if "proxy_groupid" in sum_kwargs:
+                    ret["changes"]["proxy_groupid"] = str(proxy_groupid)
+                elif "proxyid" in sum_kwargs:
+                    ret["changes"]["proxyid"] = str(proxy_hostid)
                 if "error" in hostupdate:
                     error.append(hostupdate["error"])
             if update_hostgroups:
@@ -496,12 +554,12 @@ def present(host, groups, interfaces, **kwargs):
     else:
         # combine connection_args and host_properties
         sum_kwargs = host_extra_properties
+        sum_kwargs.update(host_mandatory_properties)
         sum_kwargs.update(connection_args)
         host_create = __salt__["zabbix.host_create"](
             host,
             groups,
             interfaces_formated,
-            proxy_hostid=proxy_hostid,
             inventory=new_inventory,
             visible_name=visible_name,
             **sum_kwargs,
@@ -629,12 +687,14 @@ def assign_templates(host, templates, **kwargs):
 
     # Set comments
     comment_host_templates_updated = "Templates updated."
-    comment_host_templ_notupdated = f"Unable to update templates on host: {host}."
+    comment_host_templ_notupdated = "Unable to update templates on host: {}.".format(
+        host
+    )
     comment_host_templates_in_sync = "Templates already synced."
 
     update_host_templates = False
-    curr_template_ids = []
-    requested_template_ids = []
+    curr_template_ids = list()
+    requested_template_ids = list()
     hostid = ""
 
     host_exists = __salt__["zabbix.host_exists"](host, **connection_args)
@@ -655,7 +715,7 @@ def assign_templates(host, templates, **kwargs):
     host_templates = __salt__["zabbix.host_get"](
         hostids=hostid,
         output='[{"hostid"}]',
-        selectParentTemplates='["templateid"]',
+        selectParentTemplates=["templateid"],
         **connection_args,
     )
     for template_id in host_templates[0]["parentTemplates"]:

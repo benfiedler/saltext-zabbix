@@ -162,7 +162,7 @@ def _query(method, params, url, auth=None):
 
     data = salt.utils.json.dumps(data)
 
-    log.info("_QUERY input:\nurl: %s\ndata: %s", str(url), str(data))
+    log.debug("_QUERY input:\nurl: %s\ndata: %s", str(url), str(data))
 
     try:
         result = salt.utils.http.query(
@@ -175,7 +175,7 @@ def _query(method, params, url, auth=None):
             status=True,
             headers=True,
         )
-        log.info("_QUERY result: %s", str(result))
+        log.debug("_QUERY result: %s", str(result))
         if "error" in result:
             raise SaltException(f"Zabbix API: Status: {result['status']} ({result['error']})")
         ret = result.get("dict", {})
@@ -231,6 +231,7 @@ def _login(**kwargs):
                 connargs[key] = val
 
     _connarg("_connection_user", "user")
+    _connarg("_connection_username", "username") # this has changed in zabbix 7
     _connarg("_connection_password", "password")
     _connarg("_connection_url", "url")
 
@@ -238,13 +239,15 @@ def _login(**kwargs):
         connargs["url"] = _frontend_url()
 
     try:
-        if connargs["user"] and connargs["password"] and connargs["url"]:
-            params = {"user": connargs["user"], "password": connargs["password"]}
+        user_param = "user" if "user" in connargs else "username"
+        if connargs[user_param] and connargs["password"] and connargs["url"]:
+            params = {user_param: connargs[user_param], "password": connargs["password"]}
             method = "user.login"
             ret = _query(method, params, connargs["url"])
             auth = ret["result"]
             connargs["auth"] = auth
             connargs.pop("user", None)
+            connargs.pop("username", None)
             connargs.pop("password", None)
             return connargs
         else:
@@ -404,7 +407,7 @@ def compare_params(defined, existing, return_old_value=False):
     # Comparison of lists of values or lists of dicts
     if isinstance(defined, list):
         if len(defined) != len(existing):
-            log.info("Different list length!")
+            log.debug("Different list length!")
             return {"new": defined, "old": existing} if return_old_value else defined
         else:
             difflist = []
@@ -1778,7 +1781,7 @@ def hostgroup_get(name=None, groupids=None, hostids=None, **connection_args):
     Retrieve host groups according to the given parameters
 
     .. note::
-        This function accepts all standard hostgroup.get properities: keyword
+        This function accepts all standard hostgroup.get properties: keyword
         argument names differ depending on your zabbix version, see here__.
 
         .. __: https://www.zabbix.com/documentation/2.2/manual/api/reference/hostgroup/get
@@ -1909,7 +1912,7 @@ def hostinterface_get(hostids, **connection_args):
     Retrieve host groups according to the given parameters
 
     .. note::
-        This function accepts all standard hostinterface.get properities:
+        This function accepts all standard hostinterface.get properties:
         keyword argument names differ depending on your zabbix version, see
         here__.
 
